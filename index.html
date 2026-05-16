@@ -633,6 +633,8 @@ let trades = [];
 let settings = { apiKey: '', sheetId: '', tabName: 'Daily Entry', defaultRisk: 200 };
 let pendingImages = [];
 let charts = {};
+let oauthToken = null;
+let tokenClient = null;
 
 // ═══════════════════════════════════════════════
 // INIT
@@ -1209,9 +1211,6 @@ function deleteTrade(id) {
 // ═══════════════════════════════════════════════
 // GOOGLE OAUTH
 // ═══════════════════════════════════════════════
-let oauthToken = null;
-let tokenClient = null;
-
 function initGoogleAuth() {
   const clientId = settings.clientId;
   if (!clientId || !window.google) return;

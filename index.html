@@ -594,6 +594,21 @@
           </div>
         </div>
       </div>
+      <div class="settings-section">
+        <div class="settings-title">Data sync</div>
+        <div class="card">
+          <div class="card-body">
+            <div class="settings-row">
+              <div>
+                <div class="settings-label">Sync all trades to Google Sheets</div>
+                <div class="settings-desc">Pushes every trade currently in the app to your sheet. Clears existing rows in the tab first, then writes all trades fresh. Make sure you are signed in above before running.</div>
+              </div>
+              <button class="btn btn-primary" onclick="bulkSyncToSheets()" id="btn-bulk-sync">Sync all trades</button>
+            </div>
+            <div id="bulk-sync-result" style="margin-top: 12px; font-size: 12px;"></div>
+          </div>
+        </div>
+      </div>
     </div>
 
   </main>
@@ -1709,6 +1724,101 @@ function monthOffset(n) {
   loadMonthly();
 }
 
+
+// ═══════════════════════════════════════════════
+// BULK SYNC
+// ═══════════════════════════════════════════════
+async function bulkSyncToSheets() {
+  if (!oauthToken) {
+    el('bulk-sync-result').innerHTML = '<span style="color:var(--red)">Not signed in. Click Sign in with Google first.</span>';
+    return;
+  }
+  if (!settings.sheetId) {
+    el('bulk-sync-result').innerHTML = '<span style="color:var(--red)">No Sheet ID set. Add it in the connection settings above.</span>';
+    return;
+  }
+  if (!trades.length) {
+    el('bulk-sync-result').innerHTML = '<span style="color:var(--muted)">No trades to sync.</span>';
+    return;
+  }
+
+  const btn = el('btn-bulk-sync');
+  btn.disabled = true;
+  btn.textContent = 'Syncing...';
+  el('bulk-sync-result').innerHTML = '<span style="color:var(--amber)">⏳ Clearing existing rows and writing ' + trades.length + ' trades...</span>';
+
+  const tabName = settings.tabName || 'Daily Entry';
+  const baseUrl = `https://sheets.googleapis.com/v4/spreadsheets/${settings.sheetId}`;
+  const headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + oauthToken };
+
+  try {
+    // Step 1: Get current sheet data to find how many rows exist
+    const getResp = await fetch(`${baseUrl}/values/${encodeURIComponent(tabName)}?key=${settings.apiKey}`, { headers });
+    const getData = await getResp.json();
+    const existingRows = (getData.values || []).length;
+
+    // Step 2: Clear all existing data rows (keep header row 1 if it exists)
+    if (existingRows > 1) {
+      const clearRange = `${tabName}!A2:Z${existingRows + 10}`;
+      await fetch(`${baseUrl}/values/${encodeURIComponent(clearRange)}:clear`, {
+        method: 'POST', headers
+      });
+    }
+
+    // Step 3: Write header row if sheet is empty
+    if (existingRows === 0) {
+      const headerRow = [['Date','Ticker','Setup','P&L ($)','Risk ($)','R-Multiple','Notes','Lesson','Rule Violation','Direction','Type']];
+      await fetch(`${baseUrl}/values/${encodeURIComponent(tabName)}!A1:append?valueInputOption=USER_ENTERED`, {
+        method: 'POST', headers, body: JSON.stringify({ values: headerRow })
+      });
+    }
+
+    // Step 4: Write all trades sorted by date
+    const sorted = [...trades].sort((a,b) => (a.date||'').localeCompare(b.date||''));
+    const rows = sorted.map(t => [
+      t.date || '', t.ticker || '', t.setup || '',
+      t.pnl !== undefined ? +t.pnl : '',
+      t.risk || '', t.rmult !== undefined && t.rmult !== null ? +t.rmult : '',
+      t.notes || '', t.lesson || '', t.violation || '', t.direction || '', t.type || ''
+    ]);
+
+    // Write in batches of 100 to avoid request size limits
+    const batchSize = 100;
+    let written = 0;
+    for (let i = 0; i < rows.length; i += batchSize) {
+      const batch = rows.slice(i, i + batchSize);
+      const appendUrl = `${baseUrl}/values/${encodeURIComponent(tabName)}:append?valueInputOption=USER_ENTERED`;
+      const resp = await fetch(appendUrl, {
+        method: 'POST', headers, body: JSON.stringify({ values: batch })
+      });
+      if (!resp.ok) {
+        const err = await resp.json();
+        if (resp.status === 401) {
+          oauthToken = null;
+          localStorage.removeItem('tradelog_oauth_token');
+          updateAuthUI(false);
+          el('bulk-sync-result').innerHTML = '<span style="color:var(--red)">⚠ Session expired. Please sign in again and retry.</span>';
+          btn.disabled = false; btn.textContent = 'Sync all trades';
+          return;
+        }
+        throw new Error(err.error?.message || 'Write failed at row ' + (i+1));
+      }
+      written += batch.length;
+      el('bulk-sync-result').innerHTML = `<span style="color:var(--amber)">⏳ Written ${written} of ${rows.length} trades...</span>`;
+    }
+
+    el('bulk-sync-result').innerHTML = `<span style="color:var(--accent)">✓ All ${trades.length} trades synced to Google Sheets successfully.</span>`;
+    showSyncToast('✓ ' + trades.length + ' trades synced to Google Sheets');
+
+  } catch(e) {
+    el('bulk-sync-result').innerHTML = `<span style="color:var(--red)">⚠ Sync failed: ${e.message}</span>`;
+    console.error('Bulk sync error', e);
+  }
+
+  btn.disabled = false;
+  btn.textContent = 'Sync all trades';
+}
+
 // ═══════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════
@@ -1729,7 +1839,6 @@ function normalizeDate(raw) {
     return y + "-" + m.padStart(2,"0") + "-" + d.padStart(2,"0");
   }
   const parsed = new Date(raw);
-  
   if (!isNaN(parsed)) return parsed.toISOString().split("T")[0];
   return raw;
 }
